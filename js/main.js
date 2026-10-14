@@ -61,7 +61,7 @@ const REVIEWS = [
     </article>`;
   let reviewSet = [...REVIEWS];
   while (reviewSet.length && reviewSet.length < 6) reviewSet = reviewSet.concat(REVIEWS);
-  $('.js-reviews').innerHTML = [...reviewSet, ...reviewSet].map(reviewCard).join('');
+  $('.js-reviews').innerHTML = reviewSet.map(reviewCard).join('');
 
   /* ---------- мобильное меню ---------- */
   $('.nav__burger').addEventListener('click', () => document.body.classList.toggle('menu-open'));
@@ -318,10 +318,9 @@ const REVIEWS = [
   if (!useDrag) proofs.forEach((card) => card.addEventListener('click', () => openLightbox($('img', card))));
 
   /* ---------- галерея: подпись всегда в видимой части фото ---------- */
-  const galleryFigs = $$('.gallery figure');
-  function placeCaptions() {
+  function placeCaptions(figs = $$('.gallery figure')) {
     const vw = innerWidth;
-    galleryFigs.forEach((fig) => {
+    figs.forEach((fig) => {
       const r = fig.getBoundingClientRect();
       const cutL = Math.max(0, -r.left);
       const cutR = Math.max(0, r.right - vw);
@@ -343,10 +342,79 @@ const REVIEWS = [
     proofs.forEach((c) => (c.style.transform = `rotate(${c.dataset.rot || 0}deg)`));
     typeHero(true);
     term.greet();
+    // без анимаций ленты не едут сами — их просто листают как обычный горизонтальный скролл
+    document.documentElement.classList.add('is-static');
     placeCaptions();
-    addEventListener('resize', placeCaptions);
-    addEventListener('scroll', placeCaptions, { passive: true });
+    addEventListener('resize', () => placeCaptions());
+    $('.gallery').addEventListener('scroll', () => placeCaptions(), { passive: true });
     return;
+  }
+
+  /* ---------- бесконечная лента: едет сама, но её можно тащить, свайпать и листать тачпадом ---------- */
+  function makeLoop(track, { speed = 40, dir = -1, area = track, onFrame } = {}) {
+    const originals = [...track.children];
+    originals.forEach((el) => {
+      const copy = el.cloneNode(true);
+      copy.setAttribute('aria-hidden', 'true');
+      track.appendChild(copy);
+    });
+    let width = 0;
+    const measure = () => { width = track.children[originals.length].offsetLeft - track.children[0].offsetLeft; };
+    measure();
+    addEventListener('resize', measure);
+
+    let x = 0, inertia = 0, auto = 1, hovered = false, dragging = false, press = null, lastX = 0, lastT = 0, vel = 0;
+    if (fine) { // на тачскринах «наведение» залипает после тапа, поэтому только для мыши
+      area.addEventListener('mouseenter', () => { hovered = true; });
+      area.addEventListener('mouseleave', () => { hovered = false; });
+    }
+
+    track.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      press = { x: e.clientX, y: e.clientY, id: e.pointerId };
+      lastX = e.clientX; lastT = performance.now(); vel = 0; inertia = 0;
+    });
+    track.addEventListener('pointermove', (e) => {
+      if (!press || e.pointerId !== press.id) return;
+      const dx = e.clientX - press.x;
+      const dy = e.clientY - press.y;
+      if (!dragging) {
+        if (Math.abs(dy) > 8 && Math.abs(dy) > Math.abs(dx)) { press = null; return; } // это вертикальный скролл страницы
+        if (Math.abs(dx) < 6) return;
+        dragging = true;
+        try { track.setPointerCapture(e.pointerId); } catch (err) { /* указатель уже отпущен — тащим без захвата */ }
+      }
+      const now = performance.now();
+      const step = e.clientX - lastX;
+      x += step;
+      vel = vel * 0.6 + (step / Math.max(1, now - lastT)) * 1000 * 0.4;
+      lastX = e.clientX; lastT = now;
+    });
+    const release = () => {
+      if (dragging) inertia = Math.max(-3000, Math.min(3000, vel));
+      dragging = false; press = null;
+    };
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach((t) => track.addEventListener(t, release));
+    area.addEventListener('wheel', (e) => {
+      if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return; // вертикальное колесо — скролл страницы
+      e.preventDefault();
+      x -= e.deltaX;
+    }, { passive: false });
+
+    return (dt) => {
+      const box = area.getBoundingClientRect();
+      if (!width || box.bottom < -100 || box.top > innerHeight + 100) return; // за экраном — не тратим кадры
+      const pause = hovered || dragging || press;
+      auto += ((pause ? 0 : 1) - auto) * Math.min(1, dt * 4);
+      if (!dragging) {
+        x += (dir * speed * auto + inertia) * dt;
+        inertia *= Math.pow(0.03, dt);
+      }
+      x %= width;
+      if (x > 0) x -= width;
+      track.style.transform = `translate3d(${x}px, 0, 0)`;
+      if (onFrame) onFrame();
+    };
   }
 
   /* =========================================================
@@ -538,13 +606,17 @@ const REVIEWS = [
   /* ---------- терминал: приветствие при появлении ---------- */
   ScrollTrigger.create({ trigger: '.terminal--big', start: 'top 80%', once: true, onEnter: () => term.greet() });
 
-  /* ---------- галерея: ряды едут навстречу и никогда не оставляют пустоты по краям ---------- */
-  const [rowA, rowB] = $$('.gallery__row');
-  const travel = (row) => Math.min(Math.max(0, row.scrollWidth - innerWidth), innerWidth * 1.4);
-  const galleryST = { trigger: '.gallery', start: 'top bottom', end: 'bottom top', scrub: true, invalidateOnRefresh: true };
-  gsap.fromTo(rowA, { x: 0 }, { x: () => -travel(rowA), ease: 'none', scrollTrigger: { ...galleryST } });
-  gsap.fromTo(rowB, { x: () => -travel(rowB) }, { x: 0, ease: 'none', scrollTrigger: { ...galleryST } });
-  ScrollTrigger.create({ trigger: '.gallery', start: 'top bottom', end: 'bottom top', onUpdate: placeCaptions, onRefresh: placeCaptions });
+  /* ---------- галерея и отзывы: бесконечные ленты, которые можно листать руками ---------- */
+  const loops = $$('.gallery__row').map((row, i) => {
+    const tick = makeLoop(row, { speed: 32, dir: i ? 1 : -1, onFrame: () => placeCaptions(figs) });
+    const figs = $$('figure', row);
+    return tick;
+  });
+  loops.push(makeLoop($('.js-reviews'), { speed: 38, area: $('.reviews__marquee') }));
+  gsap.ticker.add((time, deltaMs) => {
+    const dt = Math.min(deltaMs, 100) / 1000;
+    loops.forEach((tick) => tick(dt));
+  });
 
   /* ---------- 3D-наклон карточек цен ---------- */
   if (fine) {
